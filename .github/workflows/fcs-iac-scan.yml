@@ -1,0 +1,84 @@
+name: "CrowdStrike FCS IaC Scan"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # Allows manual trigger from GitHub UI
+
+jobs:
+  fcs-iac-scan:
+    name: "FCS IaC Security Scan"
+    runs-on: ubuntu-latest
+
+    steps:
+      # -------------------------------------------
+      # 1. Checkout the repository
+      # -------------------------------------------
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # -------------------------------------------
+      # 2. Run CrowdStrike FCS IaC Scan
+      #    - Scans the vulnerable-iac/ directory
+      #    - Uploads results to Falcon Console
+      #    - Fails if >= 1 critical finding
+      # -------------------------------------------
+      - name: Run FCS IaC Scan
+        id: fcs
+        uses: crowdstrike/fcs-action@v3.0.0
+        with:
+          falcon_client_id: ${{ vars.FALCON_CLIENT_ID }}
+          falcon_region: ${{ vars.FALCON_REGION }}
+          scan_type: iac
+          path: './vulnerable-iac'
+          project_name: 'fcs-iac-test-lab'
+          project_owners: 'yourname@yourcompany.com'
+          severities: 'critical,high,medium,informational'
+          fail_on: 'critical=1,high=5'
+          report_formats: 'sarif,json'
+          output_path: './scan-results/'
+          upload_results: true          # <<< Upload findings to Falcon Console
+        env:
+          FALCON_CLIENT_SECRET: ${{ secrets.FALCON_CLIENT_SECRET }}
+
+      # -------------------------------------------
+      # 3. Upload scan results as GitHub artifact
+      #    (always runs, even if scan step fails)
+      # -------------------------------------------
+      - name: Upload scan results as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fcs-scan-results
+          path: ./scan-results/
+
+      # -------------------------------------------
+      # 4. Upload SARIF to GitHub Security tab
+      #    (runs only when findings were detected)
+      # -------------------------------------------
+      - name: Upload SARIF to GitHub Code Scanning
+        if: always() && steps.fcs.outputs.exit-code != 0
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ./scan-results/
+
+      # -------------------------------------------
+      # 5. Print result summary
+      # -------------------------------------------
+      - name: Scan Summary
+        if: always()
+        run: |
+          echo "==========================================="
+          echo "  FCS IaC Scan Complete"
+          echo "  Exit Code: ${{ steps.fcs.outputs.exit-code }}"
+          echo "==========================================="
+          if [ "${{ steps.fcs.outputs.exit-code }}" != "0" ]; then
+            echo "SCAN FAILED — Critical/High vulnerabilities detected!"
+            echo "Results uploaded to Falcon Console (project: fcs-iac-test-lab)"
+            echo "Check the 'fcs-scan-results' artifact for local reports."
+            exit 1
+          else
+            echo "SCAN PASSED — No critical issues found."
+          fi
