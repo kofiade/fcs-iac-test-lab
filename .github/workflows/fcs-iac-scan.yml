@@ -5,12 +5,20 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatch: # Allows manual trigger from GitHub UI
+  workflow_dispatch:
 
 jobs:
   fcs-iac-scan:
     name: "FCS IaC Security Scan"
     runs-on: ubuntu-latest
+
+    # ==========================================
+    # FIX: Permissions required for SARIF upload
+    # ==========================================
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
 
     steps:
       # -------------------------------------------
@@ -21,9 +29,6 @@ jobs:
 
       # -------------------------------------------
       # 2. Run CrowdStrike FCS IaC Scan
-      #    - Scans the vulnerable-iac/ directory
-      #    - Uploads results to Falcon Console
-      #    - Fails if >= 1 critical finding
       # -------------------------------------------
       - name: Run FCS IaC Scan
         id: fcs
@@ -34,18 +39,31 @@ jobs:
           scan_type: iac
           path: './vulnerable-iac'
           project_name: 'fcs-iac-test-lab'
-          project_owners: 'yourname@yourcompany.com'
+          # FIX: removed project_owners (or replace with your real approved email)
+          # project_owners: 'kofi.addai@crowdstrike.com'
           severities: 'critical,high,medium,informational'
           fail_on: 'critical=1,high=5'
           report_formats: 'sarif,json'
           output_path: './scan-results/'
-          upload_results: true          # <<< Upload findings to Falcon Console
+          upload_results: true
         env:
           FALCON_CLIENT_SECRET: ${{ secrets.FALCON_CLIENT_SECRET }}
 
       # -------------------------------------------
-      # 3. Upload scan results as GitHub artifact
-      #    (always runs, even if scan step fails)
+      # 3. Debug: List scan output files
+      #    (helps verify SARIF was generated)
+      # -------------------------------------------
+      - name: List scan result files
+        if: always()
+        run: |
+          echo "=== Contents of ./scan-results/ ==="
+          ls -la ./scan-results/ 2>/dev/null || echo "Directory not found"
+          echo ""
+          echo "=== Looking for SARIF files ==="
+          find . -name "*.sarif" -o -name "*.sarif.json" 2>/dev/null || echo "No SARIF files found"
+
+      # -------------------------------------------
+      # 4. Upload scan results as GitHub artifact
       # -------------------------------------------
       - name: Upload scan results as artifact
         if: always()
@@ -53,19 +71,20 @@ jobs:
         with:
           name: fcs-scan-results
           path: ./scan-results/
+          if-no-files-found: warn
 
       # -------------------------------------------
-      # 4. Upload SARIF to GitHub Security tab
-      #    (runs only when findings were detected)
+      # 5. Upload SARIF to GitHub Security tab
+      #    FIX: Updated to v4
       # -------------------------------------------
       - name: Upload SARIF to GitHub Code Scanning
         if: always() && steps.fcs.outputs.exit-code != 0
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: ./scan-results/
 
       # -------------------------------------------
-      # 5. Print result summary
+      # 6. Scan Summary
       # -------------------------------------------
       - name: Scan Summary
         if: always()
