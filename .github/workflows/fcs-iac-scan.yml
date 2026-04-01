@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
 
     # ==========================================
-    # FIX: Permissions required for SARIF upload
+    # FIX: Permissions required for SARIF upload test
     # ==========================================
     permissions:
       contents: read
