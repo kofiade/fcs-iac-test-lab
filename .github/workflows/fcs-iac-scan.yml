@@ -35,178 +35,27 @@ jobs:
           project_name: 'fcs-iac-test-lab'
           severities: 'critical,high,medium,informational'
           fail_on: 'critical=1,high=5'
-          # FIX: Only request json — sarif conversion is broken in v4.0.1
-          report_formats: 'json'
-          output_path: './scan-results'
+          # FIX: Single format = file path per README docs
+          report_formats: 'sarif'
+          output_path: './scan-results/fcs-results.sarif'
           upload_results: true
         env:
           FALCON_CLIENT_SECRET: ${{ secrets.FALCON_CLIENT_SECRET }}
 
       # -------------------------------------------
-      # FIX: Manually convert FCS JSON → SARIF
-      # since fcs-action@v4.0.1 sarif conversion is broken
+      # Debug: Verify output
       # -------------------------------------------
-      - name: Convert FCS JSON to SARIF
-        if: always()
-        run: |
-          JSON_FILE=$(find ./scan-results -name "*.json" | head -1)
-
-          if [ -z "$JSON_FILE" ]; then
-            echo "No JSON file found — skipping SARIF conversion"
-            exit 0
-          fi
-
-          echo "Converting $JSON_FILE to SARIF..."
-
-          python3 << 'PYEOF'
-          import json, sys, os, glob
-
-          # Find the JSON file
-          files = glob.glob('./scan-results/*.json')
-          if not files:
-              print("No JSON files found")
-              sys.exit(0)
-
-          json_file = files[0]
-          print(f"Processing: {json_file}")
-
-          with open(json_file) as f:
-              data = json.load(f)
-
-          # Build SARIF 2.1.0 structure
-          sarif = {
-              "version": "2.1.0",
-              "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
-              "runs": [{
-                  "tool": {
-                      "driver": {
-                          "name": "CrowdStrike FCS IaC Scanner",
-                          "version": "3.3.1",
-                          "informationUri": "https://www.crowdstrike.com",
-                          "rules": []
-                      }
-                  },
-                  "results": []
-              }]
-          }
-
-          run = sarif["runs"][0]
-          rules_map = {}
-
-          # FCS JSON structure: data["Results"] contains findings
-          results = []
-          if isinstance(data, list):
-              results = data
-          elif "Results" in data:
-              results = data["Results"]
-          elif "results" in data:
-              results = data["results"]
-          elif "findings" in data:
-              results = data["findings"]
-
-          print(f"Found {len(results)} findings")
-
-          severity_map = {
-              "critical": "error",
-              "high":     "error",
-              "medium":   "warning",
-              "low":      "note",
-              "informational": "note"
-          }
-
-          for finding in results:
-              # Handle both nested and flat structures
-              rule_id   = (finding.get("PolicyID")
-                          or finding.get("policy_id")
-                          or finding.get("id")
-                          or finding.get("RuleID")
-                          or "UNKNOWN")
-
-              message   = (finding.get("PolicyName")
-                          or finding.get("policy_name")
-                          or finding.get("name")
-                          or finding.get("Message")
-                          or finding.get("description")
-                          or "IaC vulnerability detected")
-
-              severity  = (finding.get("Severity")
-                          or finding.get("severity")
-                          or "medium")).lower()
-
-              file_path = (finding.get("Filename")
-                          or finding.get("filename")
-                          or finding.get("file")
-                          or finding.get("FilePath")
-                          or "unknown")
-
-              line_num  = int(finding.get("LineNumber")
-                          or finding.get("line_number")
-                          or finding.get("line")
-                          or finding.get("StartLine")
-                          or 1)
-
-              # Add rule if not already present
-              if rule_id not in rules_map:
-                  rules_map[rule_id] = True
-                  run["tool"]["driver"]["rules"].append({
-                      "id": rule_id,
-                      "name": rule_id,
-                      "shortDescription": {"text": message},
-                      "fullDescription": {"text": message},
-                      "defaultConfiguration": {
-                          "level": severity_map.get(severity, "warning")
-                      },
-                      "helpUri": "https://www.crowdstrike.com",
-                      "properties": {"tags": ["security", "iac"]}
-                  })
-
-              run["results"].append({
-                  "ruleId": rule_id,
-                  "level": severity_map.get(severity, "warning"),
-                  "message": {"text": message},
-                  "locations": [{
-                      "physicalLocation": {
-                          "artifactLocation": {
-                              "uri": file_path,
-                              "uriBaseId": "%SRCROOT%"
-                          },
-                          "region": {
-                              "startLine": line_num
-                          }
-                      }
-                  }]
-              })
-
-          sarif_path = './scan-results/fcs-results.sarif'
-          with open(sarif_path, 'w') as f:
-              json.dump(sarif, f, indent=2)
-
-          print(f"SARIF written to: {sarif_path}")
-          print(f"Rules: {len(run['tool']['driver']['rules'])}")
-          print(f"Results: {len(run['results'])}")
-          PYEOF
-
-      # -------------------------------------------
-      # Verify SARIF was created
-      # -------------------------------------------
-      - name: Verify SARIF output
+      - name: List scan result files
         if: always()
         run: |
           echo "=== scan-results/ contents ==="
-          ls -la ./scan-results/
+          ls -la ./scan-results/ 2>/dev/null || echo "Directory not found"
           echo ""
-          if [ -f "./scan-results/fcs-results.sarif" ]; then
-            echo "✅ SARIF file created successfully"
-            echo "Size: $(wc -c < ./scan-results/fcs-results.sarif) bytes"
-            echo "Results count: $(python3 -c "
-          import json
-          with open('./scan-results/fcs-results.sarif') as f:
-              d = json.load(f)
-          print(len(d['runs'][0]['results']))
-            ")"
-          else
-            echo "❌ SARIF file NOT found"
-          fi
+          echo "=== FCS Action Outputs ==="
+          echo "exit-code:  ${{ steps.fcs.outputs.exit-code }}"
+          echo ""
+          echo "=== Find all SARIF files ==="
+          find . -name "*.sarif" ! -path "./.git/*" 2>/dev/null || echo "None found"
 
       - name: Upload scan results as artifact
         if: always()
@@ -216,6 +65,9 @@ jobs:
           path: ./scan-results/
           if-no-files-found: warn
 
+      # -------------------------------------------
+      # Upload SARIF — exact pattern from README
+      # -------------------------------------------
       - name: Upload SARIF to GitHub Code Scanning
         if: always()
         uses: github/codeql-action/upload-sarif@v4
