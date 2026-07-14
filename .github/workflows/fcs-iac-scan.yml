@@ -32,7 +32,7 @@ jobs:
       # -------------------------------------------
       - name: Run FCS IaC Scan
         id: fcs
-        uses: crowdstrike/fcs-action@v3.0.0
+        uses: crowdstrike/fcs-action@v4.0.1
         with:
           falcon_client_id: ${{ vars.FALCON_CLIENT_ID }}
           falcon_region: ${{ vars.FALCON_REGION }}
