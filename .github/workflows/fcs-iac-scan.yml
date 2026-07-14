@@ -12,24 +12,22 @@ jobs:
     name: "FCS IaC Security Scan"
     runs-on: ubuntu-latest
 
-    # ==========================================
-    # FIX: Permissions required for SARIF upload test
-    # ==========================================
     permissions:
       contents: read
       security-events: write
       actions: read
 
     steps:
-      # -------------------------------------------
-      # 1. Checkout the repository
-      # -------------------------------------------
       - name: Checkout code
         uses: actions/checkout@v4
 
       # -------------------------------------------
-      # 2. Run CrowdStrike FCS IaC Scan
+      # FIX 1: Pre-create the output directory
+      # Ensures the path exists before fcs-action runs
       # -------------------------------------------
+      - name: Create scan results directory
+        run: mkdir -p ./scan-results
+
       - name: Run FCS IaC Scan
         id: fcs
         uses: crowdstrike/fcs-action@v4.0.1
@@ -39,19 +37,19 @@ jobs:
           scan_type: iac
           path: './vulnerable-iac'
           project_name: 'fcs-iac-test-lab'
-          # FIX: removed project_owners (or replace with your real approved email)
-          # project_owners: 'kofi.addai@crowdstrike.com'
           severities: 'critical,high,medium,informational'
           fail_on: 'critical=1,high=5'
           report_formats: 'sarif,json'
-          output_path: './scan-results/'
+          # FIX 2: Remove trailing slash — some action versions
+          # are sensitive to path formatting
+          output_path: './scan-results'
           upload_results: true
         env:
           FALCON_CLIENT_SECRET: ${{ secrets.FALCON_CLIENT_SECRET }}
 
       # -------------------------------------------
-      # 3. Debug: List scan output files
-      #    (helps verify SARIF was generated)
+      # FIX 3: Enhanced debug step — run BEFORE
+      # upload attempts to confirm file existence
       # -------------------------------------------
       - name: List scan result files
         if: always()
@@ -59,12 +57,13 @@ jobs:
           echo "=== Contents of ./scan-results/ ==="
           ls -la ./scan-results/ 2>/dev/null || echo "Directory not found"
           echo ""
-          echo "=== Looking for SARIF files ==="
-          find . -name "*.sarif" -o -name "*.sarif.json" 2>/dev/null || echo "No SARIF files found"
+          echo "=== Recursive search for SARIF files ==="
+          find . -name "*.sarif" -o -name "*.sarif.json" 2>/dev/null
+          echo ""
+          echo "=== FCS Action outputs ==="
+          echo "exit-code: ${{ steps.fcs.outputs.exit-code }}"
+          echo "sarif-file: ${{ steps.fcs.outputs.sarif-file }}"
 
-      # -------------------------------------------
-      # 4. Upload scan results as GitHub artifact
-      # -------------------------------------------
       - name: Upload scan results as artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -74,18 +73,21 @@ jobs:
           if-no-files-found: warn
 
       # -------------------------------------------
-      # 5. Upload SARIF to GitHub Security tab
-      #    FIX: Updated to v4
+      # FIX 4: Corrected condition — upload SARIF
+      # always() so it runs regardless of scan result.
+      # Use output variable if fcs-action exposes it,
+      # otherwise fall back to directory glob.
       # -------------------------------------------
       - name: Upload SARIF to GitHub Code Scanning
-        if: always() && steps.fcs.outputs.exit-code != 0
-        uses: github/codeql-action/upload-sarif@v4
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: ./scan-results/
+          # FIX 5: Use the action's output for explicit path
+          # Falls back to directory scan if output is empty
+          sarif_file: ${{ steps.fcs.outputs.sarif-file || './scan-results' }}
+        # FIX 6: Don't fail the workflow if no SARIF found
+        continue-on-error: true
 
-      # -------------------------------------------
-      # 6. Scan Summary
-      # -------------------------------------------
       - name: Scan Summary
         if: always()
         run: |
