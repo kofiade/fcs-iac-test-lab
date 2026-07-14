@@ -35,16 +35,83 @@ jobs:
           project_name: 'fcs-iac-test-lab'
           severities: 'critical,high,medium,informational'
           fail_on: 'critical=1,high=5'
-          # FIX: Single format = file path per README docs
-          report_formats: 'sarif'
-          output_path: './scan-results/fcs-results.sarif'
+          # Use json only — we'll convert to valid SARIF manually
+          report_formats: 'json'
+          output_path: './scan-results'
           upload_results: true
         env:
           FALCON_CLIENT_SECRET: ${{ secrets.FALCON_CLIENT_SECRET }}
 
       # -------------------------------------------
-      # Debug: Verify output
+      # Use the action's own converter script
+      # shipped with fcs-action@v4.0.1
       # -------------------------------------------
+      - name: Convert JSON to SARIF using FCS converter
+        if: always()
+        run: |
+          echo "=== Locating FCS action converter ==="
+          CONVERTER=$(find /home/runner/work/_actions/crowdstrike/fcs-action \
+            -name "json_to_sarif_converter.py" 2>/dev/null | head -1)
+          echo "Converter path: $CONVERTER"
+
+          JSON_FILE=$(find ./scan-results -name "*.json" | head -1)
+          echo "JSON file: $JSON_FILE"
+
+          if [ -z "$CONVERTER" ]; then
+            echo "❌ Converter not found — falling back to manual conversion"
+            exit 1
+          fi
+
+          if [ -z "$JSON_FILE" ]; then
+            echo "❌ No JSON file found in ./scan-results"
+            exit 1
+          fi
+
+          echo "=== Running FCS SARIF converter ==="
+          python3 "$CONVERTER" \
+            --input "$JSON_FILE" \
+            --output "./scan-results/fcs-results.sarif"
+
+          echo "=== Verifying output ==="
+          if [ -f "./scan-results/fcs-results.sarif" ]; then
+            echo "✅ SARIF file created"
+            python3 -c "
+          import json
+          with open('./scan-results/fcs-results.sarif') as f:
+              d = json.load(f)
+          print(f'version: {d.get(\"version\")}')
+          print(f'runs count: {len(d.get(\"runs\", []))}')
+          print(f'results count: {len(d[\"runs\"][0][\"results\"]) if d.get(\"runs\") else 0}')
+            "
+          else
+            echo "❌ SARIF conversion failed"
+            exit 1
+          fi
+
+      # -------------------------------------------
+      # Fallback: If converter fails or has wrong args,
+      # inspect it first and convert manually
+      # -------------------------------------------
+      - name: Fallback - Inspect converter and convert manually
+        if: failure()
+        run: |
+          echo "=== Converter script signature ==="
+          CONVERTER=$(find /home/runner/work/_actions/crowdstrike/fcs-action \
+            -name "json_to_sarif_converter.py" 2>/dev/null | head -1)
+
+          if [ -n "$CONVERTER" ]; then
+            echo "--- First 50 lines of converter ---"
+            head -50 "$CONVERTER"
+            echo ""
+            echo "--- Converter --help ---"
+            python3 "$CONVERTER" --help 2>&1 || true
+          fi
+
+          echo ""
+          echo "=== Raw JSON structure (first 100 lines) ==="
+          JSON_FILE=$(find ./scan-results -name "*.json" | head -1)
+          head -100 "$JSON_FILE" 2>/dev/null || echo "No JSON file found"
+
       - name: List scan result files
         if: always()
         run: |
@@ -52,10 +119,7 @@ jobs:
           ls -la ./scan-results/ 2>/dev/null || echo "Directory not found"
           echo ""
           echo "=== FCS Action Outputs ==="
-          echo "exit-code:  ${{ steps.fcs.outputs.exit-code }}"
-          echo ""
-          echo "=== Find all SARIF files ==="
-          find . -name "*.sarif" ! -path "./.git/*" 2>/dev/null || echo "None found"
+          echo "exit-code: ${{ steps.fcs.outputs.exit-code }}"
 
       - name: Upload scan results as artifact
         if: always()
@@ -65,9 +129,6 @@ jobs:
           path: ./scan-results/
           if-no-files-found: warn
 
-      # -------------------------------------------
-      # Upload SARIF — exact pattern from README
-      # -------------------------------------------
       - name: Upload SARIF to GitHub Code Scanning
         if: always()
         uses: github/codeql-action/upload-sarif@v4
