@@ -21,10 +21,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # -------------------------------------------
-      # FIX 1: Pre-create the output directory
-      # Ensures the path exists before fcs-action runs
-      # -------------------------------------------
       - name: Create scan results directory
         run: mkdir -p ./scan-results
 
@@ -40,53 +36,62 @@ jobs:
           severities: 'critical,high,medium,informational'
           fail_on: 'critical=1,high=5'
           report_formats: 'sarif,json'
-          # FIX 2: Remove trailing slash — some action versions
-          # are sensitive to path formatting
           output_path: './scan-results'
           upload_results: true
         env:
           FALCON_CLIENT_SECRET: ${{ secrets.FALCON_CLIENT_SECRET }}
 
-      # -------------------------------------------
-      # FIX 3: Enhanced debug step — run BEFORE
-      # upload attempts to confirm file existence
-      # -------------------------------------------
-      - name: List scan result files
+      # -----------------------------------------------
+      # DIAGNOSTIC: Dump everything we can find
+      # -----------------------------------------------
+      - name: DIAGNOSTIC - Full filesystem search
         if: always()
         run: |
-          echo "=== Contents of ./scan-results/ ==="
-          ls -la ./scan-results/ 2>/dev/null || echo "Directory not found"
-          echo ""
-          echo "=== Recursive search for SARIF files ==="
-          find . -name "*.sarif" -o -name "*.sarif.json" 2>/dev/null
-          echo ""
-          echo "=== FCS Action outputs ==="
-          echo "exit-code: ${{ steps.fcs.outputs.exit-code }}"
+          echo "====== ALL FCS ACTION OUTPUTS ======"
+          echo "exit-code:  ${{ steps.fcs.outputs.exit-code }}"
           echo "sarif-file: ${{ steps.fcs.outputs.sarif-file }}"
+          echo "json-file:  ${{ steps.fcs.outputs.json-file }}"
+          echo "output-path: ${{ steps.fcs.outputs.output-path }}"
+          echo ""
+          echo "====== scan-results/ CONTENTS ======"
+          ls -laR ./scan-results/ 2>/dev/null || echo "Directory missing"
+          echo ""
+          echo "====== FIND ALL REPORT FILES ======"
+          find . \( \
+            -name "*.sarif" \
+            -o -name "*.sarif.json" \
+            -o -name "*.json" \
+            -o -name "*.csv" \
+            -o -name "*.xml" \
+            -o -name "*.html" \
+            -o -name "*.txt" \
+          \) \
+          ! -path "./.git/*" \
+          ! -path "./vulnerable-iac/*" \
+          2>/dev/null
+          echo ""
+          echo "====== FIND ALL NEW FILES (modified in last 60s) ======"
+          find . -newer ./scan-results \
+            ! -path "./.git/*" \
+            -type f 2>/dev/null
+          echo ""
+          echo "====== HOME DIR ======"
+          ls -la ~/
+          echo ""
+          echo "====== /tmp CONTENTS ======"
+          ls -la /tmp/ 2>/dev/null
 
-      - name: Upload scan results as artifact
+      - name: Upload ALL scan artifacts for inspection
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fcs-scan-results
-          path: ./scan-results/
+          # Upload everything for inspection
+          path: |
+            ./scan-results/
+            /tmp/*.sarif
+            /tmp/*.json
           if-no-files-found: warn
-
-      # -------------------------------------------
-      # FIX 4: Corrected condition — upload SARIF
-      # always() so it runs regardless of scan result.
-      # Use output variable if fcs-action exposes it,
-      # otherwise fall back to directory glob.
-      # -------------------------------------------
-      - name: Upload SARIF to GitHub Code Scanning
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          # FIX 5: Use the action's output for explicit path
-          # Falls back to directory scan if output is empty
-          sarif_file: ${{ steps.fcs.outputs.sarif-file || './scan-results' }}
-        # FIX 6: Don't fail the workflow if no SARIF found
-        continue-on-error: true
 
       - name: Scan Summary
         if: always()
@@ -97,9 +102,5 @@ jobs:
           echo "==========================================="
           if [ "${{ steps.fcs.outputs.exit-code }}" != "0" ]; then
             echo "SCAN FAILED — Critical/High vulnerabilities detected!"
-            echo "Results uploaded to Falcon Console (project: fcs-iac-test-lab)"
-            echo "Check the 'fcs-scan-results' artifact for local reports."
             exit 1
-          else
-            echo "SCAN PASSED — No critical issues found."
           fi
