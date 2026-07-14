@@ -35,63 +35,193 @@ jobs:
           project_name: 'fcs-iac-test-lab'
           severities: 'critical,high,medium,informational'
           fail_on: 'critical=1,high=5'
-          report_formats: 'sarif,json'
+          # FIX: Only request json — sarif conversion is broken in v4.0.1
+          report_formats: 'json'
           output_path: './scan-results'
           upload_results: true
         env:
           FALCON_CLIENT_SECRET: ${{ secrets.FALCON_CLIENT_SECRET }}
 
-      # -----------------------------------------------
-      # DIAGNOSTIC: Dump everything we can find
-      # -----------------------------------------------
-      - name: DIAGNOSTIC - Full filesystem search
+      # -------------------------------------------
+      # FIX: Manually convert FCS JSON → SARIF
+      # since fcs-action@v4.0.1 sarif conversion is broken
+      # -------------------------------------------
+      - name: Convert FCS JSON to SARIF
         if: always()
         run: |
-          echo "====== ALL FCS ACTION OUTPUTS ======"
-          echo "exit-code:  ${{ steps.fcs.outputs.exit-code }}"
-          echo "sarif-file: ${{ steps.fcs.outputs.sarif-file }}"
-          echo "json-file:  ${{ steps.fcs.outputs.json-file }}"
-          echo "output-path: ${{ steps.fcs.outputs.output-path }}"
-          echo ""
-          echo "====== scan-results/ CONTENTS ======"
-          ls -laR ./scan-results/ 2>/dev/null || echo "Directory missing"
-          echo ""
-          echo "====== FIND ALL REPORT FILES ======"
-          find . \( \
-            -name "*.sarif" \
-            -o -name "*.sarif.json" \
-            -o -name "*.json" \
-            -o -name "*.csv" \
-            -o -name "*.xml" \
-            -o -name "*.html" \
-            -o -name "*.txt" \
-          \) \
-          ! -path "./.git/*" \
-          ! -path "./vulnerable-iac/*" \
-          2>/dev/null
-          echo ""
-          echo "====== FIND ALL NEW FILES (modified in last 60s) ======"
-          find . -newer ./scan-results \
-            ! -path "./.git/*" \
-            -type f 2>/dev/null
-          echo ""
-          echo "====== HOME DIR ======"
-          ls -la ~/
-          echo ""
-          echo "====== /tmp CONTENTS ======"
-          ls -la /tmp/ 2>/dev/null
+          JSON_FILE=$(find ./scan-results -name "*.json" | head -1)
 
-      - name: Upload ALL scan artifacts for inspection
+          if [ -z "$JSON_FILE" ]; then
+            echo "No JSON file found — skipping SARIF conversion"
+            exit 0
+          fi
+
+          echo "Converting $JSON_FILE to SARIF..."
+
+          python3 << 'PYEOF'
+          import json, sys, os, glob
+
+          # Find the JSON file
+          files = glob.glob('./scan-results/*.json')
+          if not files:
+              print("No JSON files found")
+              sys.exit(0)
+
+          json_file = files[0]
+          print(f"Processing: {json_file}")
+
+          with open(json_file) as f:
+              data = json.load(f)
+
+          # Build SARIF 2.1.0 structure
+          sarif = {
+              "version": "2.1.0",
+              "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+              "runs": [{
+                  "tool": {
+                      "driver": {
+                          "name": "CrowdStrike FCS IaC Scanner",
+                          "version": "3.3.1",
+                          "informationUri": "https://www.crowdstrike.com",
+                          "rules": []
+                      }
+                  },
+                  "results": []
+              }]
+          }
+
+          run = sarif["runs"][0]
+          rules_map = {}
+
+          # FCS JSON structure: data["Results"] contains findings
+          results = []
+          if isinstance(data, list):
+              results = data
+          elif "Results" in data:
+              results = data["Results"]
+          elif "results" in data:
+              results = data["results"]
+          elif "findings" in data:
+              results = data["findings"]
+
+          print(f"Found {len(results)} findings")
+
+          severity_map = {
+              "critical": "error",
+              "high":     "error",
+              "medium":   "warning",
+              "low":      "note",
+              "informational": "note"
+          }
+
+          for finding in results:
+              # Handle both nested and flat structures
+              rule_id   = (finding.get("PolicyID")
+                          or finding.get("policy_id")
+                          or finding.get("id")
+                          or finding.get("RuleID")
+                          or "UNKNOWN")
+
+              message   = (finding.get("PolicyName")
+                          or finding.get("policy_name")
+                          or finding.get("name")
+                          or finding.get("Message")
+                          or finding.get("description")
+                          or "IaC vulnerability detected")
+
+              severity  = (finding.get("Severity")
+                          or finding.get("severity")
+                          or "medium")).lower()
+
+              file_path = (finding.get("Filename")
+                          or finding.get("filename")
+                          or finding.get("file")
+                          or finding.get("FilePath")
+                          or "unknown")
+
+              line_num  = int(finding.get("LineNumber")
+                          or finding.get("line_number")
+                          or finding.get("line")
+                          or finding.get("StartLine")
+                          or 1)
+
+              # Add rule if not already present
+              if rule_id not in rules_map:
+                  rules_map[rule_id] = True
+                  run["tool"]["driver"]["rules"].append({
+                      "id": rule_id,
+                      "name": rule_id,
+                      "shortDescription": {"text": message},
+                      "fullDescription": {"text": message},
+                      "defaultConfiguration": {
+                          "level": severity_map.get(severity, "warning")
+                      },
+                      "helpUri": "https://www.crowdstrike.com",
+                      "properties": {"tags": ["security", "iac"]}
+                  })
+
+              run["results"].append({
+                  "ruleId": rule_id,
+                  "level": severity_map.get(severity, "warning"),
+                  "message": {"text": message},
+                  "locations": [{
+                      "physicalLocation": {
+                          "artifactLocation": {
+                              "uri": file_path,
+                              "uriBaseId": "%SRCROOT%"
+                          },
+                          "region": {
+                              "startLine": line_num
+                          }
+                      }
+                  }]
+              })
+
+          sarif_path = './scan-results/fcs-results.sarif'
+          with open(sarif_path, 'w') as f:
+              json.dump(sarif, f, indent=2)
+
+          print(f"SARIF written to: {sarif_path}")
+          print(f"Rules: {len(run['tool']['driver']['rules'])}")
+          print(f"Results: {len(run['results'])}")
+          PYEOF
+
+      # -------------------------------------------
+      # Verify SARIF was created
+      # -------------------------------------------
+      - name: Verify SARIF output
+        if: always()
+        run: |
+          echo "=== scan-results/ contents ==="
+          ls -la ./scan-results/
+          echo ""
+          if [ -f "./scan-results/fcs-results.sarif" ]; then
+            echo "✅ SARIF file created successfully"
+            echo "Size: $(wc -c < ./scan-results/fcs-results.sarif) bytes"
+            echo "Results count: $(python3 -c "
+          import json
+          with open('./scan-results/fcs-results.sarif') as f:
+              d = json.load(f)
+          print(len(d['runs'][0]['results']))
+            ")"
+          else
+            echo "❌ SARIF file NOT found"
+          fi
+
+      - name: Upload scan results as artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: fcs-scan-results
-          # Upload everything for inspection
-          path: |
-            ./scan-results/
-            /tmp/*.sarif
-            /tmp/*.json
+          path: ./scan-results/
           if-no-files-found: warn
+
+      - name: Upload SARIF to GitHub Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ./scan-results/fcs-results.sarif
+        continue-on-error: true
 
       - name: Scan Summary
         if: always()
@@ -102,5 +232,9 @@ jobs:
           echo "==========================================="
           if [ "${{ steps.fcs.outputs.exit-code }}" != "0" ]; then
             echo "SCAN FAILED — Critical/High vulnerabilities detected!"
+            echo "Results uploaded to Falcon Console (project: fcs-iac-test-lab)"
+            echo "Check the 'fcs-scan-results' artifact for local reports."
             exit 1
+          else
+            echo "SCAN PASSED — No critical issues found."
           fi
